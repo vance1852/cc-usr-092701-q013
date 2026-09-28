@@ -52,6 +52,13 @@ class PatientExportService:
                 (patient_id,)).fetchone()
             if consent is None or (consent["expires_at"] and parsed_timestamp(consent["expires_at"]) <= parsed_timestamp(now)):
                 raise Conflict("患者没有当前有效的数据导出授权")
+            from .retention import frozen_export_requirements
+            required = frozen_export_requirements(connection, clinic_id, patient_id)
+            missing_sections = sorted(set(required) - set(selected))
+            if missing_sections:
+                raise Conflict("活动争议冻结覆盖的章节不能从导出中遗漏",
+                               details={"missing_sections": missing_sections,
+                                        "frozen_counts": {key: len(value) for key, value in required.items()}})
             if any(item != "profile" for item in selected):
                 authorize(principal, "clinical:read", clinic_id=clinic_id)
             data: dict[str, Any] = {"patient_id": patient_id, "external_ref": patient["external_ref"],
@@ -60,13 +67,17 @@ class PatientExportService:
                 data[section] = self._section(connection, section, patient)
             body = {"format": "careflow-patient-export-v1", "clinic_id": clinic_id, "exported_at": now,
                     "consent_id": consent["id"], "sections": selected, "data": data}
+            frozen_coverage = {section: ids for section, ids in required.items() if section in selected}
+            if frozen_coverage:
+                body["frozen_records"] = frozen_coverage
             canonical = encode_json(body)
             result = {**body, "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(), "replayed": False}
             counts = {name: len(value) if isinstance(value, list) else 1 for name, value in data.items() if name in selected}
             audit.append_event(connection, clinic_id=clinic_id, actor_id=actor_id, patient_id=patient_id,
                                aggregate_type="patient_export", aggregate_id=new_id("exp"), action="patient.exported",
                                occurred_at=now, payload={"sections": selected, "reason": reason,
-                                                         "record_counts": counts, "sha256": result["sha256"]})
+                                                         "record_counts": counts, "sha256": result["sha256"],
+                                                         "frozen_coverage": frozen_coverage})
             connection.execute("INSERT INTO idempotency(scope,key,request_hash,response_json,created_at) VALUES('patient_export',?,?,?,?)",
                                (key, request_hash, encode_json(result), now))
         return result

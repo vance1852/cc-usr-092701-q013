@@ -371,6 +371,67 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS audit_patient_sequence ON audit_events(patient_id,sequence);
 CREATE INDEX IF NOT EXISTS audit_aggregate ON audit_events(aggregate_type,aggregate_id,sequence);
+CREATE TABLE IF NOT EXISTS retention_policies (
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    version INTEGER NOT NULL,
+    rules_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','superseded')),
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(clinic_id,version)
+);
+CREATE TABLE IF NOT EXISTS retention_previews (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    policy_version INTEGER NOT NULL,
+    rules_json TEXT NOT NULL,
+    cutoff_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ready','executed')),
+    fingerprint TEXT NOT NULL,
+    candidate_json TEXT NOT NULL,
+    skipped_json TEXT NOT NULL,
+    counts_json TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    executed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS retention_previews_clinic ON retention_previews(clinic_id,created_at);
+CREATE TABLE IF NOT EXISTS retention_executions (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL UNIQUE REFERENCES retention_previews(id),
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    policy_version INTEGER NOT NULL,
+    result_json TEXT NOT NULL,
+    executed_by TEXT NOT NULL REFERENCES staff(id),
+    executed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS record_freezes (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    patient_id TEXT REFERENCES patients(id),
+    scope_start TEXT,
+    scope_end TEXT,
+    reason TEXT NOT NULL,
+    notice_ref TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','released')),
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    released_by TEXT REFERENCES staff(id),
+    released_at TEXT,
+    release_external_ref TEXT,
+    release_doc_digest TEXT,
+    release_note TEXT
+);
+CREATE INDEX IF NOT EXISTS record_freezes_clinic_state ON record_freezes(clinic_id,state);
+CREATE INDEX IF NOT EXISTS record_freezes_patient ON record_freezes(patient_id,state);
+CREATE TABLE IF NOT EXISTS record_freeze_items (
+    freeze_id TEXT NOT NULL REFERENCES record_freezes(id),
+    record_category TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(freeze_id,record_category,record_id)
+);
+CREATE INDEX IF NOT EXISTS record_freeze_items_record ON record_freeze_items(record_category,record_id);
 """
 
 

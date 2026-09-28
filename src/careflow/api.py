@@ -233,6 +233,35 @@ def create_handler(app: Careflow):
                 return app.verify_audit(clinic_id, actor_id), 200
             if self.command == "GET" and segments == ["audit", "diagnostics"]:
                 return app.run_diagnostics(clinic_id, actor_id), 200
+            if self.command == "POST" and segments == ["retention", "policy"]:
+                return app.retention.set_policy(clinic_id, actor_id, self.body().get("rules", [])), 200
+            if self.command == "GET" and segments == ["retention", "policy"]:
+                return app.retention.get_policy(clinic_id, actor_id), 200
+            if self.command == "POST" and segments == ["retention", "previews"]:
+                return app.retention.create_preview(clinic_id, actor_id), 201
+            if len(segments) == 4 and segments[:2] == ["retention", "previews"] and segments[3] == "refresh" and self.command == "POST":
+                return app.retention.refresh_preview(clinic_id, actor_id, segments[2]), 200
+            if len(segments) == 4 and segments[:2] == ["retention", "previews"] and segments[3] == "execute" and self.command == "POST":
+                return app.retention.execute_preview(clinic_id, actor_id, segments[2]), 200
+            if len(segments) == 3 and segments[:2] == ["retention", "previews"] and self.command == "GET":
+                return app.retention.get_preview(clinic_id, actor_id, segments[2]), 200
+            if self.command == "POST" and segments == ["records", "freezes"]:
+                data = self.body()
+                return app.retention.create_freeze(
+                    clinic_id, actor_id, reason=data.get("reason", ""), notice_ref=data.get("notice_ref", ""),
+                    patient_id=data.get("patient_id"), scope_start=data.get("scope_start"),
+                    scope_end=data.get("scope_end"),
+                    associated_records=data.get("associated_records", [])), 201
+            if self.command == "GET" and segments == ["records", "freezes"]:
+                params = parse_qs(path.query)
+                return app.retention.list_freezes(clinic_id, actor_id, state=params.get("state", [None])[0]), 200
+            if len(segments) == 3 and segments[0] == "records" and segments[1] == "freezes" and self.command == "GET":
+                return app.retention.get_freeze(clinic_id, actor_id, segments[2]), 200
+            if len(segments) == 4 and segments[0] == "records" and segments[1] == "freezes" and segments[3] == "release" and self.command == "POST":
+                data = self.body()
+                return app.retention.release_freeze(
+                    clinic_id, actor_id, segments[2], external_ref=data.get("external_ref", ""),
+                    doc_digest=data.get("doc_digest"), note=data.get("note")), 200
             if self.command == "POST" and segments == ["products"]:
                 data = self.body()
                 return app.supplies.register_product(clinic_id, actor_id, data.get("name", ""),
