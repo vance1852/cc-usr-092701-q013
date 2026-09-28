@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import StorageFailure
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -371,6 +371,85 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS audit_patient_sequence ON audit_events(patient_id,sequence);
 CREATE INDEX IF NOT EXISTS audit_aggregate ON audit_events(aggregate_type,aggregate_id,sequence);
+CREATE TABLE IF NOT EXISTS retention_policies (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    version INTEGER NOT NULL,
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    supersedes TEXT REFERENCES retention_policies(id),
+    UNIQUE(clinic_id,version)
+);
+CREATE TABLE IF NOT EXISTS retention_policy_rules (
+    policy_id TEXT NOT NULL REFERENCES retention_policies(id),
+    record_category TEXT NOT NULL,
+    retention_days INTEGER NOT NULL CHECK(retention_days >= 0),
+    PRIMARY KEY(policy_id,record_category)
+);
+CREATE TABLE IF NOT EXISTS retention_freezes (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    patient_id TEXT NOT NULL REFERENCES patients(id),
+    scope_start DATE NOT NULL,
+    scope_end DATE NOT NULL,
+    reason TEXT NOT NULL,
+    external_notice_ref TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','released')),
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    released_by TEXT REFERENCES staff(id),
+    released_at TEXT,
+    release_notice_ref TEXT,
+    release_reason TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    CHECK(scope_end >= scope_start),
+    CHECK(state='active' OR (released_by IS NOT NULL AND released_at IS NOT NULL
+          AND release_notice_ref IS NOT NULL AND release_reason IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS retention_freezes_patient_state ON retention_freezes(clinic_id,patient_id,state);
+CREATE TABLE IF NOT EXISTS retention_freeze_records (
+    freeze_id TEXT NOT NULL REFERENCES retention_freezes(id),
+    record_category TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    PRIMARY KEY(freeze_id,record_category,record_id)
+);
+CREATE INDEX IF NOT EXISTS retention_freeze_records_lookup ON retention_freeze_records(record_category,record_id);
+CREATE TABLE IF NOT EXISTS retention_cleaned (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    record_category TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    patient_id TEXT,
+    policy_id TEXT NOT NULL,
+    policy_version INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    cleaned_by TEXT REFERENCES staff(id),
+    cleaned_at TEXT NOT NULL,
+    UNIQUE(record_category,record_id,run_id)
+);
+CREATE INDEX IF NOT EXISTS retention_cleaned_run ON retention_cleaned(run_id);
+CREATE TABLE IF NOT EXISTS retention_runs (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    policy_id TEXT NOT NULL,
+    policy_version INTEGER NOT NULL,
+    rules_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('previewed','executed','superseded','voided')),
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    executed_by TEXT REFERENCES staff(id),
+    executed_at TEXT,
+    idempotency_key TEXT UNIQUE,
+    candidates_total INTEGER NOT NULL DEFAULT 0,
+    to_clean_total INTEGER NOT NULL DEFAULT 0,
+    frozen_skipped_total INTEGER NOT NULL DEFAULT 0,
+    cleaned_total INTEGER NOT NULL DEFAULT 0,
+    scope_as_of TEXT NOT NULL,
+    scope_fingerprint TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    skipped_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS retention_runs_clinic_created ON retention_runs(clinic_id,created_at);
 """
 
 

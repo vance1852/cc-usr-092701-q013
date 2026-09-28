@@ -233,6 +233,41 @@ def create_handler(app: Careflow):
                 return app.verify_audit(clinic_id, actor_id), 200
             if self.command == "GET" and segments == ["audit", "diagnostics"]:
                 return app.run_diagnostics(clinic_id, actor_id), 200
+            if self.command == "POST" and segments == ["retention", "policies"]:
+                data = self.body()
+                return app.retention.create_policy(clinic_id, actor_id, data.get("rules", {})), 201
+            if self.command == "GET" and segments == ["retention", "policy"]:
+                return app.retention.get_policy(clinic_id, actor_id), 200
+            if self.command == "POST" and len(segments) == 3 and segments[0] == "patients" and segments[2] == "retention-freezes":
+                data = self.body()
+                return app.retention.create_freeze(clinic_id, actor_id, segments[1],
+                                                   data.get("scope_start", ""), data.get("scope_end", ""),
+                                                   data.get("reason", ""), data.get("external_notice_ref", ""),
+                                                   related_records=data.get("related_records")), 201
+            if self.command == "GET" and segments == ["retention", "freezes"]:
+                params = parse_qs(path.query)
+                return app.retention.list_freezes(clinic_id, actor_id,
+                                                  patient_id=params.get("patient_id", [None])[0],
+                                                  state=params.get("state", [None])[0]), 200
+            if self.command == "GET" and len(segments) == 3 and segments[0] == "retention" and segments[1] == "freezes":
+                return app.retention.get_freeze(clinic_id, actor_id, segments[2]), 200
+            if self.command == "POST" and len(segments) == 4 and segments[0] == "retention" and segments[1] == "freezes" and segments[3] == "release":
+                data = self.body()
+                return app.retention.release_freeze(clinic_id, actor_id, segments[2],
+                                                    data.get("release_notice_ref", ""),
+                                                    data.get("release_reason", "")), 200
+            if self.command == "POST" and segments == ["retention", "previews"]:
+                return app.retention.create_preview(clinic_id, actor_id), 201
+            if self.command == "GET" and len(segments) == 3 and segments[0] == "retention" and segments[1] == "previews":
+                return app.retention.get_preview(clinic_id, actor_id, segments[2]), 200
+            if self.command == "POST" and len(segments) == 4 and segments[0] == "retention" and segments[1] == "previews" and segments[3] == "execute":
+                data = self.body()
+                return app.retention.execute_preview(clinic_id, actor_id, segments[2],
+                                                     self.headers.get("Idempotency-Key", "")), 200
+            if self.command == "GET" and segments == ["retention", "runs"]:
+                params = parse_qs(path.query)
+                return app.retention.run_history(clinic_id, actor_id,
+                                                 limit=int(params.get("limit", [50])[0])), 200
             if self.command == "POST" and segments == ["products"]:
                 data = self.body()
                 return app.supplies.register_product(clinic_id, actor_id, data.get("name", ""),

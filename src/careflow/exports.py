@@ -9,10 +9,16 @@ from . import audit
 from .db import Database, decode_json, encode_json
 from .errors import Conflict, NotFound, ValidationError
 from .ids import new_id
+from .retention import active_freeze_record_ids, merge_component_patient_ids
 from .security import authorize, principal_for
 from .validation import choice, parsed_timestamp, text, timestamp
 
 EXPORT_SECTIONS = {"profile", "consents", "assessments", "plans", "observations", "appointments", "followups", "incidents"}
+
+# 争议冻结的可清理记录类别与导出章节的对应关系。
+FREEZE_CATEGORY_SECTION = {"appointment_cancelled": "appointments",
+                           "followup_closed": "followups",
+                           "assessment_draft": "assessments"}
 
 
 class PatientExportService:
@@ -54,10 +60,17 @@ class PatientExportService:
                 raise Conflict("患者没有当前有效的数据导出授权")
             if any(item != "profile" for item in selected):
                 authorize(principal, "clinical:read", clinic_id=clinic_id)
+            # 合并来源档案与活动争议冻结显式关联的档案都不得从导出中遗漏。
+            component_patients = sorted(merge_component_patient_ids(connection, clinic_id, patient_id))
+            frozen_extra: dict[str, set[str]] = {}
+            for category, section in FREEZE_CATEGORY_SECTION.items():
+                if section in selected:
+                    frozen_extra[section] = active_freeze_record_ids(connection, clinic_id, patient_id, category)
             data: dict[str, Any] = {"patient_id": patient_id, "external_ref": patient["external_ref"],
                                     "display_name": patient["display_name"], "state": patient["state"]}
             for section in selected:
-                data[section] = self._section(connection, section, patient)
+                data[section] = self._section(connection, section, patient, component_patients,
+                                              frozen_extra.get(section, set()))
             body = {"format": "careflow-patient-export-v1", "clinic_id": clinic_id, "exported_at": now,
                     "consent_id": consent["id"], "sections": selected, "data": data}
             canonical = encode_json(body)
@@ -72,39 +85,69 @@ class PatientExportService:
         return result
 
     @staticmethod
-    def _section(connection, section: str, patient):
+    def _in_clause(identifier: str, column: str, patient_ids: list[str], extra_ids: set[str]) -> tuple[str, list]:
+        placeholders = ",".join("?" for _ in patient_ids)
+        clause = f"{column} IN ({placeholders})"
+        params: list = [*patient_ids]
+        if extra_ids:
+            extra_placeholders = ",".join("?" for _ in extra_ids)
+            clause = f"({clause} OR {identifier} IN ({extra_placeholders}))"
+            params.extend(sorted(extra_ids))
+        return clause, params
+
+    @classmethod
+    def _section(cls, connection, section: str, patient, patient_ids: list[str], frozen_extra: set[str]):
         patient_id = patient["id"]
+        scope, scope_params = cls._in_clause("patient_id", "patient_id", patient_ids, set())
         if section == "profile":
             # 通过字段白名单避免联系方式密文、合并目标等内部字段外泄。
             return {"patient_id": patient_id, "external_ref": patient["external_ref"],
                     "display_name": patient["display_name"], "birth_date": patient["birth_date"],
                     "state": patient["state"], "created_at": patient["created_at"]}
         if section == "consents":
-            rows = connection.execute("SELECT purpose,revision,text_digest,state,effective_at,expires_at,created_at FROM consents WHERE patient_id=? ORDER BY purpose,revision", (patient_id,)).fetchall()
+            rows = connection.execute(
+                f"SELECT purpose,revision,text_digest,state,effective_at,expires_at,created_at FROM consents WHERE {scope} "
+                "ORDER BY purpose,revision", scope_params).fetchall()
             return [dict(row) for row in rows]
         if section == "assessments":
-            rows = connection.execute("SELECT id,kind,captured_at,captured_by,measurements_json,answers_json,source,status,signed_at,version FROM assessments WHERE patient_id=? ORDER BY captured_at,id", (patient_id,)).fetchall()
+            clause, params = cls._in_clause("id", "patient_id", patient_ids, frozen_extra)
+            rows = connection.execute(
+                f"SELECT id,kind,captured_at,captured_by,measurements_json,answers_json,source,status,signed_at,version "
+                f"FROM assessments WHERE {clause} ORDER BY captured_at,id", params).fetchall()
             return [{"id": row["id"], "kind": row["kind"], "captured_at": row["captured_at"],
                      "captured_by": row["captured_by"], "measurements": decode_json(row["measurements_json"]),
                      "answers": decode_json(row["answers_json"]), "source": row["source"],
                      "status": row["status"], "signed_at": row["signed_at"], "version": row["version"]} for row in rows]
         if section == "plans":
-            rows = connection.execute("SELECT id,kind,state,created_by,clinical_owner,assessment_id,consent_id,goal_json,risk_json,start_date,target_date,created_at,updated_at,version FROM plans WHERE patient_id=? ORDER BY created_at,id", (patient_id,)).fetchall()
+            rows = connection.execute(
+                f"SELECT id,kind,state,created_by,clinical_owner,assessment_id,consent_id,goal_json,risk_json,"
+                f"start_date,target_date,created_at,updated_at,version FROM plans WHERE {scope} ORDER BY created_at,id",
+                scope_params).fetchall()
             return [{"id": row["id"], "kind": row["kind"], "state": row["state"], "created_by": row["created_by"],
                      "clinical_owner": row["clinical_owner"], "assessment_id": row["assessment_id"], "consent_id": row["consent_id"],
                      "goal": decode_json(row["goal_json"]), "risk": decode_json(row["risk_json"]),
                      "start_date": row["start_date"], "target_date": row["target_date"],
                      "created_at": row["created_at"], "updated_at": row["updated_at"], "version": row["version"]} for row in rows]
         if section == "observations":
-            rows = connection.execute("SELECT id,plan_id,kind,value_num,value_text,unit,observed_at,recorded_by,provenance,correction_of,created_at FROM observations WHERE patient_id=? ORDER BY observed_at,id", (patient_id,)).fetchall()
+            rows = connection.execute(
+                f"SELECT id,plan_id,kind,value_num,value_text,unit,observed_at,recorded_by,provenance,correction_of,created_at "
+                f"FROM observations WHERE {scope} ORDER BY observed_at,id", scope_params).fetchall()
             return [dict(row) for row in rows]
         if section == "appointments":
-            rows = connection.execute("SELECT id,plan_id,staff_id,kind,starts_at,ends_at,state,created_at,version FROM appointments WHERE patient_id=? ORDER BY starts_at,id", (patient_id,)).fetchall()
+            clause, params = cls._in_clause("id", "patient_id", patient_ids, frozen_extra)
+            rows = connection.execute(
+                f"SELECT id,plan_id,staff_id,kind,starts_at,ends_at,state,created_at,version FROM appointments "
+                f"WHERE {clause} ORDER BY starts_at,id", params).fetchall()
             return [dict(row) for row in rows]
         if section == "followups":
-            rows = connection.execute("SELECT id,plan_id,due_at,channel,reason,state,assigned_to,outcome,created_at,version FROM followups WHERE patient_id=? ORDER BY due_at,id", (patient_id,)).fetchall()
+            clause, params = cls._in_clause("id", "patient_id", patient_ids, frozen_extra)
+            rows = connection.execute(
+                f"SELECT id,plan_id,due_at,channel,reason,state,assigned_to,outcome,created_at,version FROM followups "
+                f"WHERE {clause} ORDER BY due_at,id", params).fetchall()
             return [dict(row) for row in rows]
         if section == "incidents":
-            rows = connection.execute("SELECT id,plan_id,encounter_id,severity,state,category,onset_at,reported_at,reported_by,assigned_to,summary,version FROM incidents WHERE patient_id=? ORDER BY reported_at,id", (patient_id,)).fetchall()
+            rows = connection.execute(
+                f"SELECT id,plan_id,encounter_id,severity,state,category,onset_at,reported_at,reported_by,assigned_to,"
+                f"summary,version FROM incidents WHERE {scope} ORDER BY reported_at,id", scope_params).fetchall()
             return [dict(row) for row in rows]
         raise ValidationError("导出章节无效")
